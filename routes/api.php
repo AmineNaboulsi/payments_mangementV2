@@ -25,6 +25,11 @@ use Illuminate\Support\Facades\Route;
 Route::post('/register', [RegisterController::class, 'register']);
 Route::post('/login', [LoginController::class, 'login']);
 
+// Test route for 500 error (remove in production)
+Route::get('/test-500-error', function () {
+    throw new \Exception('This is a test 500 error for JSON response testing');
+});
+
 // Routes requiring authentication
 Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     // Auth routes
@@ -56,4 +61,14 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     // Payment history routes
     Route::get('/payment-history', [PaymentHistoryController::class, 'index']);
     Route::get('/groups/{group}/expenses/{expense}/shares/{share}/payments', [PaymentHistoryController::class, 'shareHistory']);
+});
+
+// Catch-all route for 404 errors in API - must be at the end
+Route::fallback(function () {
+    return response()->json([
+        'success' => false,
+        'message' => 'API endpoint not found. Please check the URL and try again.',
+        'status_code' => 404,
+        'error_code' => 'ENDPOINT_NOT_FOUND'
+    ], 404);
 });
