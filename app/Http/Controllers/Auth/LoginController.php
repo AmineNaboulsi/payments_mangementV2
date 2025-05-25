@@ -19,13 +19,13 @@ class LoginController extends Controller
                 'password' => ['required', 'string'],
             ]);
 
-            if (!Auth::attempt($credentials)) {
+            if (!Auth::guard('web')->attempt($credentials)) {
                 return response()->json([
                     'message' => 'Invalid login credentials',
                 ], Response::HTTP_UNAUTHORIZED);
             }
 
-            $user = Auth::user();
+            $user = Auth::guard('web')->user();
             
             $user->tokens()->delete();
             

@@ -4,273 +4,391 @@ namespace App\Http\Controllers;
 
 use App\Models\Group;
 use App\Models\User;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Cache;
+use Throwable;
 
 class GroupController extends Controller
 {
-    public function index()
+    public function index(): JsonResponse
     {
-        try {
+        return $this->handleRequest(function () {
             $user = Auth::user();
             
-            // Fix the pivot query - status is in the pivot table
             $groups = $user->groups()
                 ->wherePivot('status', 'accepted')
                 ->with('creator')
+                ->withCount('members')
                 ->get();
 
-            return response()->json([
+            return $this->successResponse([
                 'groups' => $groups,
-            ]);
-        } catch (\Exception $e) {
-            Log::error('Group index error: ' . $e->getMessage());
-            Log::error('Stack trace: ' . $e->getTraceAsString());
-            
-            return response()->json([
-                'message' => 'Error retrieving groups',
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
-            ], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
+            ], 'Groups retrieved successfully');
+        });
     }
 
-    public function store(Request $request)
+    public function store(Request $request): JsonResponse
     {
-        try {
-            $request->validate([
-                'name' => ['required', 'string', 'max:255'],
-                'description' => ['nullable', 'string'],
+        return $this->handleRequest(function () use ($request) {
+            $validatedData = $request->validate([
+                'name' => ['required', 'string', 'max:255', 'min:2'],
+                'description' => ['nullable', 'string', 'max:1000'],
             ]);
 
             $user = Auth::user();
 
-            $group = Group::create([
-                'name' => $request->name,
-                'description' => $request->description,
-                'created_by' => $user->id,
-            ]);
+            DB::beginTransaction();
+            try {
+                $group = Group::create([
+                    'name' => $validatedData['name'],
+                    'description' => $validatedData['description'],
+                    'created_by' => $user->id,
+                ]);
 
-            $group->members()->attach($user->id, ['status' => 'accepted']);
-            
-            Cache::forget("user_groups_{$user->id}");
+                $group->members()->attach($user->id, ['status' => 'accepted']);
 
-            return response()->json([
-                'message' => 'Group created successfully',
-                'group' => $group,
-            ], Response::HTTP_CREATED);
-        } catch (\Exception $e) {
-            Log::error('Group store error: ' . $e->getMessage());
-            
-            return response()->json([
-                'message' => 'Error creating group',
-                'error' => $e->getMessage()
-            ], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
+                DB::commit();
+
+                $group->load('creator');
+
+                Log::info('Group created successfully', [
+                    'group_id' => $group->id,
+                    'group_name' => $group->name,
+                    'user_id' => $user->id,
+                ]);
+
+                return $this->successResponse([
+                    'group' => $group,
+                ], 'Group created successfully', Response::HTTP_CREATED);
+
+            } catch (Throwable $e) {
+                DB::rollBack();
+                return $this->handleDatabaseError($e, 'group creation');
+            }
+        });
     }
 
-    public function show(Group $group)
+    public function show(Group $group): JsonResponse
     {
-        try {
+        return $this->handleRequest(function () use ($group) {
             $this->authorizeView($group);
-            $user = Auth::user();
             
-            $cacheKey = "group_details_{$group->id}_{$user->id}";
-            $groupData = Cache::remember($cacheKey, 300, function() use ($group) {
-                $group->load('creator', 'members', 'expenses.paidBy', 'expenses.shares.user');
-                return $group;
-            });
-
-            return response()->json([
-                'group' => $groupData,
-            ]);
-        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
-            // Re-throw HTTP exceptions (like 403 Forbidden) without modification
-            throw $e;
-        } catch (\Exception $e) {
-            Log::error('Group show error: ' . $e->getMessage());
-            
-            return response()->json([
-                'message' => 'Error retrieving group',
-                'error' => $e->getMessage()
-            ], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
-    }
-
-    public function update(Request $request, Group $group)
-    {
-        try {
-            $this->authorizeUpdate($group);
-            $user = Auth::user();
-
-            $request->validate([
-                'name' => ['required', 'string', 'max:255'],
-                'description' => ['nullable', 'string'],
+            $group->load([
+                'creator',
+                'members' => function ($query) {
+                    $query->wherePivot('status', 'accepted');
+                },
+                'expenses.paidBy',
+                'expenses.shares.user'
             ]);
 
-            $group->update([
-                'name' => $request->name,
-                'description' => $request->description,
-            ]);
-            
-            Cache::forget("group_details_{$group->id}_{$user->id}");
-            
-            $memberIds = $group->members()->pluck('user_id')->toArray();
-            foreach ($memberIds as $memberId) {
-                Cache::forget("user_groups_{$memberId}");
-                Cache::forget("group_balances_{$group->id}_{$memberId}");
-            }
-
-            return response()->json([
-                'message' => 'Group updated successfully',
+            return $this->successResponse([
                 'group' => $group,
-            ]);
-        } catch (\Exception $e) {
-            Log::error('Group update error: ' . $e->getMessage());
-            
-            return response()->json([
-                'message' => 'Error updating group',
-                'error' => $e->getMessage()
-            ], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
+            ], 'Group retrieved successfully');
+        });
     }
 
-    public function destroy(Group $group)
+    public function update(Request $request, Group $group): JsonResponse
     {
-        try {
-            $this->authorizeDelete($group);
-            $user = Auth::user();
-            
-            $memberIds = $group->members()->pluck('user_id')->toArray();
-            
-            $group->delete();
-            
-            Cache::forget("group_details_{$group->id}_{$user->id}");
-            
-            foreach ($memberIds as $memberId) {
-                Cache::forget("user_groups_{$memberId}");
-                Cache::forget("group_balances_{$group->id}_{$memberId}");
-            }
-
-            return response()->json([
-                'message' => 'Group deleted successfully',
-            ]);
-        } catch (\Exception $e) {
-            Log::error('Group destroy error: ' . $e->getMessage());
-            
-            return response()->json([
-                'message' => 'Error deleting group',
-                'error' => $e->getMessage()
-            ], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
-    }
-
-    public function addMember(Request $request, Group $group)
-    {
-        try {
+        return $this->handleRequest(function () use ($request, $group) {
             $this->authorizeUpdate($group);
 
-            $request->validate([
+            $validatedData = $request->validate([
+                'name' => ['required', 'string', 'max:255', 'min:2'],
+                'description' => ['nullable', 'string', 'max:1000'],
+            ]);
+
+            try {
+                $group->update([
+                    'name' => $validatedData['name'],
+                    'description' => $validatedData['description'],
+                ]);
+
+                Log::info('Group updated successfully', [
+                    'group_id' => $group->id,
+                    'group_name' => $group->name,
+                    'user_id' => Auth::id(),
+                ]);
+
+                return $this->successResponse([
+                    'group' => $group->fresh(),
+                ], 'Group updated successfully');
+
+            } catch (Throwable $e) {
+                return $this->handleDatabaseError($e, 'group update');
+            }
+        });
+    }
+
+    public function destroy(Group $group): JsonResponse
+    {
+        return $this->handleRequest(function () use ($group) {
+            $this->authorizeDelete($group);
+            
+            // Check if group has any expenses
+            $hasExpenses = $group->expenses()->exists();
+            if ($hasExpenses) {
+                return $this->badRequestResponse('Cannot delete group that contains expenses');
+            }
+
+            try {
+                $groupId = $group->id;
+                $groupName = $group->name;
+                
+                $group->delete();
+
+                Log::info('Group deleted successfully', [
+                    'group_id' => $groupId,
+                    'group_name' => $groupName,
+                    'user_id' => Auth::id(),
+                ]);
+
+                return $this->successResponse(null, 'Group deleted successfully');
+
+            } catch (Throwable $e) {
+                return $this->handleDatabaseError($e, 'group deletion');
+            }
+        });
+    }
+
+    public function addMember(Request $request, Group $group): JsonResponse
+    {
+        return $this->handleRequest(function () use ($request, $group) {
+            $this->authorizeUpdate($group);
+
+            $validatedData = $request->validate([
                 'email' => ['required', 'email', 'exists:users,email'],
             ]);
 
-            $user = User::where('email', $request->email)->first();
+            $user = User::where('email', $validatedData['email'])->first();
 
-            if ($group->members()->where('user_id', $user->id)->exists()) {
-                return response()->json([
-                    'message' => 'User is already a member of this group',
-                ], Response::HTTP_BAD_REQUEST);
+            if (!$user) {
+                return $this->notFoundResponse('User with this email');
             }
 
-            $group->members()->attach($user->id, ['status' => 'pending']);
+            // Check if user is already a member (any status)
+            $existingMembership = $group->members()->where('user_id', $user->id)->first();
             
-            Cache::forget("user_invitations_{$user->id}");
+            if ($existingMembership) {
+                $status = $existingMembership->pivot->status;
+                
+                if ($status === 'accepted') {
+                    return $this->badRequestResponse('User is already a member of this group');
+                } elseif ($status === 'pending') {
+                    return $this->badRequestResponse('User already has a pending invitation to this group');
+                } elseif ($status === 'rejected') {
+                    // Re-invite the user by updating status to pending
+                    try {
+                        $group->members()->updateExistingPivot($user->id, ['status' => 'pending']);
+                        
+                        Log::info('User re-invited to group', [
+                            'group_id' => $group->id,
+                            'invited_user_id' => $user->id,
+                            'inviter_user_id' => Auth::id(),
+                        ]);
 
-            return response()->json([
-                'message' => 'Member added successfully',
-            ]);
-        } catch (\Exception $e) {
-            Log::error('Group addMember error: ' . $e->getMessage());
-            
-            return response()->json([
-                'message' => 'Error adding member to group',
-                'error' => $e->getMessage()
-            ], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
+                        return $this->successResponse([
+                            'user' => $user->only(['id', 'name', 'email']),
+                        ], 'User re-invited to group successfully');
+
+                    } catch (Throwable $e) {
+                        return $this->handleDatabaseError($e, 'user re-invitation');
+                    }
+                }
+            }
+
+            // Add new member with pending status
+            try {
+                $group->members()->attach($user->id, ['status' => 'pending']);
+
+                Log::info('User invited to group', [
+                    'group_id' => $group->id,
+                    'invited_user_id' => $user->id,
+                    'inviter_user_id' => Auth::id(),
+                ]);
+
+                return $this->successResponse([
+                    'user' => $user->only(['id', 'name', 'email']),
+                ], 'User invited to group successfully');
+
+            } catch (Throwable $e) {
+                return $this->handleDatabaseError($e, 'user invitation');
+            }
+        });
     }
 
-    public function acceptInvitation(Group $group)
+    public function acceptInvitation(Group $group): JsonResponse
     {
-        try {
+        return $this->handleRequest(function () use ($group) {
             $user = Auth::user();
             $membership = $group->members()->where('user_id', $user->id)->first();
 
-            if (!$membership || $membership->pivot->status !== 'pending') {
-                return response()->json([
-                    'message' => 'Invalid invitation',
-                ], Response::HTTP_BAD_REQUEST);
+            if (!$membership) {
+                return $this->notFoundResponse('Group invitation');
             }
 
-            $group->members()->updateExistingPivot($user->id, ['status' => 'accepted']);
-            
-            Cache::forget("user_groups_{$user->id}");
-            Cache::forget("user_invitations_{$user->id}");
-            Cache::forget("group_details_{$group->id}_{$user->id}");
+            if ($membership->pivot->status === 'accepted') {
+                return $this->badRequestResponse('You are already a member of this group');
+            }
 
-            return response()->json([
-                'message' => 'Invitation accepted successfully',
-            ]);
-        } catch (\Exception $e) {
-            Log::error('Group acceptInvitation error: ' . $e->getMessage());
-            
-            return response()->json([
-                'message' => 'Error accepting invitation',
-                'error' => $e->getMessage()
-            ], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
+            if ($membership->pivot->status !== 'pending') {
+                return $this->badRequestResponse('No pending invitation found for this group');
+            }
+
+            try {
+                $group->members()->updateExistingPivot($user->id, ['status' => 'accepted']);
+
+                Log::info('Group invitation accepted', [
+                    'group_id' => $group->id,
+                    'user_id' => $user->id,
+                ]);
+
+                return $this->successResponse([
+                    'group' => $group->load('creator'),
+                ], 'Invitation accepted successfully');
+
+            } catch (Throwable $e) {
+                return $this->handleDatabaseError($e, 'invitation acceptance');
+            }
+        });
     }
 
-    public function rejectInvitation(Group $group)
+    public function rejectInvitation(Group $group): JsonResponse
     {
-        try {
+        return $this->handleRequest(function () use ($group) {
             $user = Auth::user();
             $membership = $group->members()->where('user_id', $user->id)->first();
 
-            if (!$membership || $membership->pivot->status !== 'pending') {
-                return response()->json([
-                    'message' => 'Invalid invitation',
-                ], Response::HTTP_BAD_REQUEST);
+            if (!$membership) {
+                return $this->notFoundResponse('Group invitation');
             }
 
-            $group->members()->updateExistingPivot($user->id, ['status' => 'rejected']);
-            
-            Cache::forget("user_invitations_{$user->id}");
+            if ($membership->pivot->status !== 'pending') {
+                return $this->badRequestResponse('No pending invitation found for this group');
+            }
 
-            return response()->json([
-                'message' => 'Invitation rejected successfully',
-            ]);
-        } catch (\Exception $e) {
-            Log::error('Group rejectInvitation error: ' . $e->getMessage());
-            
-            return response()->json([
-                'message' => 'Error rejecting invitation',
-                'error' => $e->getMessage()
-            ], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
+            try {
+                $group->members()->updateExistingPivot($user->id, ['status' => 'rejected']);
+
+                Log::info('Group invitation rejected', [
+                    'group_id' => $group->id,
+                    'user_id' => $user->id,
+                ]);
+
+                return $this->successResponse(null, 'Invitation rejected successfully');
+
+            } catch (Throwable $e) {
+                return $this->handleDatabaseError($e, 'invitation rejection');
+            }
+        });
     }
 
-    public function balances(Group $group)
+    public function removeMember(Request $request, Group $group): JsonResponse
     {
-        try {
+        return $this->handleRequest(function () use ($request, $group) {
+            $this->authorizeUpdate($group);
+
+            $validatedData = $request->validate([
+                'user_id' => ['required', 'integer', 'exists:users,id'],
+            ]);
+
+            $userToRemove = User::find($validatedData['user_id']);
+            $currentUser = Auth::user();
+
+            // Cannot remove yourself
+            if ($userToRemove->id === $currentUser->id) {
+                return $this->badRequestResponse('You cannot remove yourself from the group. Use leave group instead.');
+            }
+
+            // Check if user is actually a member
+            $membership = $group->members()->where('user_id', $userToRemove->id)->first();
+            if (!$membership) {
+                return $this->notFoundResponse('User membership in this group');
+            }
+
+            // Check if user has unpaid expenses
+            $hasUnpaidExpenses = $group->expenses()
+                ->whereHas('shares', function ($query) use ($userToRemove) {
+                    $query->where('user_id', $userToRemove->id)
+                          ->where('is_paid', false);
+                })
+                ->exists();
+
+            if ($hasUnpaidExpenses) {
+                return $this->badRequestResponse('Cannot remove user who has unpaid expenses in this group');
+            }
+
+            try {
+                $group->members()->detach($userToRemove->id);
+
+                Log::info('Member removed from group', [
+                    'group_id' => $group->id,
+                    'removed_user_id' => $userToRemove->id,
+                    'remover_user_id' => $currentUser->id,
+                ]);
+
+                return $this->successResponse(null, 'Member removed from group successfully');
+
+            } catch (Throwable $e) {
+                return $this->handleDatabaseError($e, 'member removal');
+            }
+        });
+    }
+
+    public function leaveGroup(Group $group): JsonResponse
+    {
+        return $this->handleRequest(function () use ($group) {
+            $user = Auth::user();
+
+            // Check if user is the creator
+            if ($group->created_by === $user->id) {
+                return $this->badRequestResponse('Group creator cannot leave the group. Transfer ownership or delete the group instead.');
+            }
+
+            // Check if user is actually a member
+            $membership = $group->members()->where('user_id', $user->id)->first();
+            if (!$membership) {
+                return $this->notFoundResponse('Your membership in this group');
+            }
+
+            // Check if user has unpaid expenses
+            $hasUnpaidExpenses = $group->expenses()
+                ->whereHas('shares', function ($query) use ($user) {
+                    $query->where('user_id', $user->id)
+                          ->where('is_paid', false);
+                })
+                ->exists();
+
+            if ($hasUnpaidExpenses) {
+                return $this->badRequestResponse('You cannot leave the group while you have unpaid expenses');
+            }
+
+            try {
+                $group->members()->detach($user->id);
+
+                Log::info('User left group', [
+                    'group_id' => $group->id,
+                    'user_id' => $user->id,
+                ]);
+
+                return $this->successResponse(null, 'Left group successfully');
+
+            } catch (Throwable $e) {
+                return $this->handleDatabaseError($e, 'leaving group');
+            }
+        });
+    }
+
+    public function balances(Group $group): JsonResponse
+    {
+        return $this->handleRequest(function () use ($group) {
             $this->authorizeView($group);
-            $user = Auth::user();
             
-            $cacheKey = "group_balances_{$group->id}_{$user->id}";
-            
-            return Cache::remember($cacheKey, 900, function() use ($group) {
+            try {
                 $expenses = $group->expenses()
                     ->with(['shares' => function($query) {
                         $query->select('id', 'expense_id', 'user_id', 'share_amount', 'paid_amount', 'is_paid');
@@ -281,7 +399,17 @@ class GroupController extends Controller
                     ->select(['id', 'group_id', 'paid_by', 'amount', 'date'])
                     ->get();
                 
-                $members = $group->members()->wherePivot('status', 'accepted')->get();
+                $members = $group->members()
+                    ->wherePivot('status', 'accepted')
+                    ->select('users.id', 'users.name')
+                    ->get();
+
+                if ($members->isEmpty()) {
+                    return $this->successResponse([
+                        'balances' => [],
+                        'simplified_debts' => [],
+                    ], 'No active members in group');
+                }
 
                 $balances = [];
                 foreach ($members as $member) {
@@ -292,15 +420,24 @@ class GroupController extends Controller
                     $paidBy = $expense->paid_by;
                     $totalAmount = $expense->amount;
 
-                    $balances[$paidBy] += $totalAmount;
+                    // Add amount paid by user
+                    if (isset($balances[$paidBy])) {
+                        $balances[$paidBy] += $totalAmount;
+                    }
                     
                     foreach ($expense->shares as $share) {
+                        if (!isset($balances[$share->user_id])) {
+                            continue; // Skip if user is no longer in group
+                        }
+
                         $paidAmount = $share->paid_amount;
                         
-                        if ($paidAmount > 0) {
+                        // Subtract what was paid back to the person who paid
+                        if ($paidAmount > 0 && isset($balances[$paidBy])) {
                             $balances[$paidBy] -= $paidAmount;
                         }
                         
+                        // Subtract unpaid amount from debtor
                         $unpaidAmount = $share->share_amount - $paidAmount;
                         if ($unpaidAmount > 0) {
                             $balances[$share->user_id] -= $unpaidAmount;
@@ -311,39 +448,51 @@ class GroupController extends Controller
                 $balanceDetails = [];
                 foreach ($balances as $userId => $balance) {
                     $user = $members->firstWhere('id', $userId);
-                    $balanceDetails[] = [
-                        'user_id' => $userId,
-                        'user_name' => $user->name,
-                        'balance' => round($balance, 2),
-                    ];
+                    if ($user) {
+                        $balanceDetails[] = [
+                            'user_id' => $userId,
+                            'user_name' => $user->name,
+                            'balance' => round($balance, 2),
+                        ];
+                    }
                 }
 
                 $simplifiedDebts = $this->calculateSimplifiedDebts($balanceDetails);
 
-                return [
+                return $this->successResponse([
                     'balances' => $balanceDetails,
                     'simplified_debts' => $simplifiedDebts,
-                ];
-            });
-        } catch (\Exception $e) {
-            Log::error('Group balances error: ' . $e->getMessage());
-            
-            return response()->json([
-                'message' => 'Error calculating balances',
-                'error' => $e->getMessage()
-            ], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
+                ], 'Balances calculated successfully');
+
+            } catch (Throwable $e) {
+                Log::error('Error calculating group balances', [
+                    'group_id' => $group->id,
+                    'user_id' => Auth::id(),
+                    'error' => $e->getMessage(),
+                ]);
+
+                return $this->errorResponse(
+                    'Failed to calculate group balances',
+                    Response::HTTP_INTERNAL_SERVER_ERROR,
+                    null,
+                    'BALANCE_CALCULATION_ERROR'
+                );
+            }
+        });
     }
 
-    private function calculateSimplifiedDebts($balances)
+    /**
+     * Calculate simplified debt structure
+     */
+    private function calculateSimplifiedDebts(array $balances): array
     {
         $creditors = [];
         $debtors = [];
 
         foreach ($balances as $balance) {
-            if ($balance['balance'] > 0) {
+            if ($balance['balance'] > 0.01) { // Creditor (owed money)
                 $creditors[] = $balance;
-            } elseif ($balance['balance'] < 0) {
+            } elseif ($balance['balance'] < -0.01) { // Debtor (owes money)
                 $debtors[] = [
                     'user_id' => $balance['user_id'],
                     'user_name' => $balance['user_name'],
@@ -353,14 +502,16 @@ class GroupController extends Controller
         }
 
         $debts = [];
+        $creditorIndex = 0;
+        $debtorIndex = 0;
 
-        while (!empty($creditors) && !empty($debtors)) {    
-            $creditor = $creditors[0];
-            $debtor = $debtors[0];
+        while ($creditorIndex < count($creditors) && $debtorIndex < count($debtors)) {
+            $creditor = $creditors[$creditorIndex];
+            $debtor = $debtors[$debtorIndex];
 
             $amount = min($creditor['balance'], $debtor['balance']);
             
-            if ($amount > 0) {
+            if ($amount > 0.01) {
                 $debts[] = [
                     'from_user_id' => $debtor['user_id'],
                     'from_user_name' => $debtor['user_name'],
@@ -370,22 +521,25 @@ class GroupController extends Controller
                 ];
             }
 
-            $creditor['balance'] -= $amount;
-            $debtor['balance'] -= $amount;
+            $creditors[$creditorIndex]['balance'] -= $amount;
+            $debtors[$debtorIndex]['balance'] -= $amount;
 
-            if ($creditor['balance'] <= 0.01) {
-                array_shift($creditors);
+            if ($creditors[$creditorIndex]['balance'] <= 0.01) {
+                $creditorIndex++;
             }
 
-            if ($debtor['balance'] <= 0.01) {
-                array_shift($debtors);
+            if ($debtors[$debtorIndex]['balance'] <= 0.01) {
+                $debtorIndex++;
             }
         }
 
         return $debts;
     }
 
-    private function authorizeView(Group $group)
+    /**
+     * Authorize user access to group
+     */
+    private function authorizeView(Group $group): void
     {
         $user = Auth::user();
         $isMember = $group->members()
@@ -394,23 +548,29 @@ class GroupController extends Controller
             ->exists();
 
         if (!$isMember) {
-            abort(Response::HTTP_FORBIDDEN, 'You are not authorized to view this group');
+            abort(Response::HTTP_FORBIDDEN, 'You are not authorized to access this group');
         }
     }
 
-    private function authorizeUpdate(Group $group)
+    /**
+     * Authorize user to update group
+     */
+    private function authorizeUpdate(Group $group): void
     {
         $user = Auth::user();
         if ($group->created_by !== $user->id) {
-            abort(Response::HTTP_FORBIDDEN, 'You are not authorized to update this group');
+            abort(Response::HTTP_FORBIDDEN, 'Only the group creator can modify this group');
         }
     }
 
-    private function authorizeDelete(Group $group)
+    /**
+     * Authorize user to delete group
+     */
+    private function authorizeDelete(Group $group): void
     {
         $user = Auth::user();
         if ($group->created_by !== $user->id) {
-            abort(Response::HTTP_FORBIDDEN, 'You are not authorized to delete this group');
+            abort(Response::HTTP_FORBIDDEN, 'Only the group creator can delete this group');
         }
     }
 }
