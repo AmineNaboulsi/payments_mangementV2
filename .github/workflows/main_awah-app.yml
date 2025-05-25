@@ -1,7 +1,7 @@
 # Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
 # More GitHub Actions for Azure: https://github.com/Azure/actions
 
-name: Build and deploy PHP app to Azure Web App - awah
+name: Build and deploy PHP app to Azure Web App - awah-app
 
 on:
   push:
@@ -64,15 +64,15 @@ jobs:
       - name: Login to Azure
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_D009DCFD7E1E4609AF5C03E177996E33 }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_84747089575849B8B9A6A44F4C137AD7 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_8CD0FCE24BE84A949138D68412C28CFE }}
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_12415D4F07214FC995B4FF0A3F7EE6F0 }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_9887BAAD570549349DB471294B880FBE }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_6E5E567C528E468BB3650B519D7B6200 }}
 
       - name: 'Deploy to Azure Web App'
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
         with:
-          app-name: 'awah'
+          app-name: 'awah-app'
           slot-name: 'Production'
           package: .
           
