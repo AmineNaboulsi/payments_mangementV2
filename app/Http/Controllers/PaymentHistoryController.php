@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Helpers\RedisCacheHelper;
 use App\Http\Resources\PaymentHistoryResource;
 use App\Models\ExpenseShare;
 use App\Models\Group;
@@ -10,6 +9,7 @@ use App\Models\PaymentHistory;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 
 class PaymentHistoryController extends Controller
 {
@@ -30,7 +30,7 @@ class PaymentHistoryController extends Controller
         $perPage = $request->input('per_page', 15);
         $cacheKey .= "_page_{$page}_per_{$perPage}";
         
-        return RedisCacheHelper::remember($cacheKey, 15, function() use ($user, $request, $perPage) {
+        return Cache::remember($cacheKey, 900, function() use ($user, $request, $perPage) {
             $query = PaymentHistory::where('user_id', $user->id);
             
             if ($request->has('group_id')) {
@@ -63,7 +63,7 @@ class PaymentHistoryController extends Controller
         
         $cacheKey = "share_history_group_{$group->id}_expense_{$expenseId}_share_{$shareId}";
         
-        return RedisCacheHelper::remember($cacheKey, 30, function() use ($group, $expenseId, $shareId) {
+        return Cache::remember($cacheKey, 1800, function() use ($group, $expenseId, $shareId) {
             $share = ExpenseShare::with(['expense.paidBy', 'user'])
                 ->where('id', $shareId)
                 ->firstOrFail();

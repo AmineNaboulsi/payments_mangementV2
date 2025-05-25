@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Helpers\RedisCacheHelper;
 use App\Models\Expense;
 use App\Models\ExpenseShare;
 use App\Models\Group;
@@ -11,6 +10,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
 
 class ExpenseController extends Controller
 {
@@ -19,13 +19,11 @@ class ExpenseController extends Controller
         $this->authorizeView($group);
         $user = Auth::user();
         
-        $cacheKey = "group_expenses_{$group->id}_{$user->id}";
-        $expenses = RedisCacheHelper::remember($cacheKey, 5, function() use ($group) {
-            return $group->expenses()
-                ->with('paidBy', 'shares.user')
-                ->orderBy('date', 'desc')
-                ->get();
-        });
+        // Temporarily disable caching to debug the issue
+        $expenses = $group->expenses()
+            ->with('paidBy', 'shares.user')
+            ->orderBy('date', 'desc')
+            ->get();
 
         return response()->json([
             'expenses' => $expenses,
@@ -46,7 +44,7 @@ class ExpenseController extends Controller
             'shared_with.*' => ['required', 'integer', 'exists:users,id'],
         ]);
 
-        $members = $group->members()->where('status', 'accepted')->pluck('user_id')->toArray();
+        $members = $group->members()->wherePivot('status', 'accepted')->pluck('user_id')->toArray();
         
         if (!in_array($request->paid_by, $members)) {
             return response()->json([
@@ -86,11 +84,11 @@ class ExpenseController extends Controller
 
             DB::commit();
             
-            RedisCacheHelper::forget("group_expenses_{$group->id}_{$user->id}");
+            Cache::forget("group_expenses_{$group->id}_{$user->id}");
             $memberIds = $group->members()->pluck('user_id')->toArray();
             foreach ($memberIds as $memberId) {
-                RedisCacheHelper::forget("user_groups:{$memberId}");
-                RedisCacheHelper::forget("group_balances_{$group->id}_{$memberId}");
+                Cache::forget("user_groups:{$memberId}");
+                Cache::forget("group_balances_{$group->id}_{$memberId}");
             }
 
             $expense->load('paidBy', 'shares.user');
@@ -112,7 +110,7 @@ class ExpenseController extends Controller
         $user = Auth::user();
         
         $cacheKey = "expense_details_{$expense->id}_{$user->id}";
-        $expenseData = RedisCacheHelper::remember($cacheKey, 5, function() use ($expense) {
+        $expenseData = Cache::remember($cacheKey, 300, function() use ($expense) {
             $expense->load('paidBy', 'shares.user');
             return $expense;
         });
@@ -127,6 +125,7 @@ class ExpenseController extends Controller
         $this->authorizeView($group);
         $this->validateExpenseBelongsToGroup($group, $expense);
         $this->authorizeUpdate($expense);
+        $user = Auth::user();
 
         $request->validate([
             'description' => ['required', 'string', 'max:255'],
@@ -137,7 +136,7 @@ class ExpenseController extends Controller
             'shared_with.*' => ['required', 'integer', 'exists:users,id'],
         ]);
 
-        $members = $group->members()->where('status', 'accepted')->pluck('user_id')->toArray();
+        $members = $group->members()->wherePivot('status', 'accepted')->pluck('user_id')->toArray();
         
         if (!in_array($request->paid_by, $members)) {
             return response()->json([
@@ -178,12 +177,12 @@ class ExpenseController extends Controller
 
             DB::commit();
             
-            RedisCacheHelper::forget("group_expenses_{$group->id}_{$user->id}");
-            RedisCacheHelper::forget("expense_details_{$expense->id}_{$user->id}");
+            Cache::forget("group_expenses_{$group->id}_{$user->id}");
+            Cache::forget("expense_details_{$expense->id}_{$user->id}");
             
             $memberIds = $group->members()->pluck('user_id')->toArray();
             foreach ($memberIds as $memberId) {
-                RedisCacheHelper::forget("group_balances_{$group->id}_{$memberId}");
+                Cache::forget("group_balances_{$group->id}_{$memberId}");
             }
 
             $expense->load('paidBy', 'shares.user');
@@ -203,16 +202,17 @@ class ExpenseController extends Controller
         $this->authorizeView($group);
         $this->validateExpenseBelongsToGroup($group, $expense);
         $this->authorizeUpdate($expense);
+        $user = Auth::user();
         
         $expenseId = $expense->id;
         $expense->delete();
         
-        RedisCacheHelper::forget("group_expenses_{$group->id}_{$user->id}");
-        RedisCacheHelper::forget("expense_details_{$expenseId}_{$user->id}");
+        Cache::forget("group_expenses_{$group->id}_{$user->id}");
+        Cache::forget("expense_details_{$expenseId}_{$user->id}");
         
         $memberIds = $group->members()->pluck('user_id')->toArray();
         foreach ($memberIds as $memberId) {
-            RedisCacheHelper::forget("group_balances_{$group->id}_{$memberId}");
+            Cache::forget("group_balances_{$group->id}_{$memberId}");
         }
 
         return response()->json([
@@ -225,6 +225,7 @@ class ExpenseController extends Controller
         $this->authorizeView($group);
         $this->validateExpenseBelongsToGroup($group, $expense);
         $this->validateShareBelongsToExpense($expense, $share);
+        $user = Auth::user();
 
         if ($share->is_paid) {
             return response()->json([
@@ -250,12 +251,12 @@ class ExpenseController extends Controller
 
             DB::commit();
             
-            RedisCacheHelper::forget("group_expenses_{$group->id}_{$user->id}");
-            RedisCacheHelper::forget("expense_details_{$expense->id}_{$user->id}");
+            Cache::forget("group_expenses_{$group->id}_{$user->id}");
+            Cache::forget("expense_details_{$expense->id}_{$user->id}");
             
             $memberIds = $group->members()->pluck('user_id')->toArray();
             foreach ($memberIds as $memberId) {
-                RedisCacheHelper::forget("group_balances_{$group->id}_{$memberId}");
+                Cache::forget("group_balances_{$group->id}_{$memberId}");
             }
 
             return response()->json([
@@ -273,6 +274,7 @@ class ExpenseController extends Controller
         $this->authorizeView($group);
         $this->validateExpenseBelongsToGroup($group, $expense);
         $this->validateShareBelongsToExpense($expense, $share);
+        $user = Auth::user();
 
         $request->validate([
             'amount' => ['required', 'numeric', 'min:0.01'],
@@ -313,12 +315,12 @@ class ExpenseController extends Controller
 
             DB::commit();
             
-            RedisCacheHelper::forget("group_expenses_{$group->id}_{$user->id}");
-            RedisCacheHelper::forget("expense_details_{$expense->id}_{$user->id}");
+            Cache::forget("group_expenses_{$group->id}_{$user->id}");
+            Cache::forget("expense_details_{$expense->id}_{$user->id}");
             
             $memberIds = $group->members()->pluck('user_id')->toArray();
             foreach ($memberIds as $memberId) {
-                RedisCacheHelper::forget("group_balances_{$group->id}_{$memberId}");
+                Cache::forget("group_balances_{$group->id}_{$memberId}");
             }
 
             return response()->json([
@@ -338,7 +340,7 @@ class ExpenseController extends Controller
         $user = Auth::user();
         $isMember = $group->members()
             ->where('user_id', $user->id)
-            ->where('status', 'accepted')
+            ->wherePivot('status', 'accepted')
             ->exists();
 
         if (!$isMember) {

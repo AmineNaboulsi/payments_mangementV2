@@ -2,13 +2,13 @@
 
 namespace App\Http\Controllers;
 
-use App\Helpers\RedisCacheHelper;
 use App\Models\Group;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 
 class GroupController extends Controller
 {
@@ -17,23 +17,23 @@ class GroupController extends Controller
         try {
             $user = Auth::user();
             
-            $cacheKey = "user_groups_{$user->id}";
-            $groups = RedisCacheHelper::remember($cacheKey, 5, function() use ($user) {
-                return $user->groups()
-                    ->where('status', 'accepted')
-                    ->with('creator')
-                    ->get();
-            });
+            // Fix the pivot query - status is in the pivot table
+            $groups = $user->groups()
+                ->wherePivot('status', 'accepted')
+                ->with('creator')
+                ->get();
 
             return response()->json([
                 'groups' => $groups,
             ]);
-        } catch (Exception $e) {
+        } catch (\Exception $e) {
             Log::error('Group index error: ' . $e->getMessage());
+            Log::error('Stack trace: ' . $e->getTraceAsString());
             
             return response()->json([
                 'message' => 'Error retrieving groups',
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
             ], Response::HTTP_INTERNAL_SERVER_ERROR);
         }
     }
@@ -56,7 +56,7 @@ class GroupController extends Controller
 
             $group->members()->attach($user->id, ['status' => 'accepted']);
             
-            RedisCacheHelper::forget("user_groups_{$user->id}");
+            Cache::forget("user_groups_{$user->id}");
 
             return response()->json([
                 'message' => 'Group created successfully',
@@ -79,7 +79,7 @@ class GroupController extends Controller
             $user = Auth::user();
             
             $cacheKey = "group_details_{$group->id}_{$user->id}";
-            $groupData = RedisCacheHelper::remember($cacheKey, 5, function() use ($group) {
+            $groupData = Cache::remember($cacheKey, 300, function() use ($group) {
                 $group->load('creator', 'members', 'expenses.paidBy', 'expenses.shares.user');
                 return $group;
             });
@@ -87,6 +87,9 @@ class GroupController extends Controller
             return response()->json([
                 'group' => $groupData,
             ]);
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            // Re-throw HTTP exceptions (like 403 Forbidden) without modification
+            throw $e;
         } catch (\Exception $e) {
             Log::error('Group show error: ' . $e->getMessage());
             
@@ -101,6 +104,7 @@ class GroupController extends Controller
     {
         try {
             $this->authorizeUpdate($group);
+            $user = Auth::user();
 
             $request->validate([
                 'name' => ['required', 'string', 'max:255'],
@@ -112,12 +116,12 @@ class GroupController extends Controller
                 'description' => $request->description,
             ]);
             
-            RedisCacheHelper::forget("group_details_{$group->id}_{$user->id}");
+            Cache::forget("group_details_{$group->id}_{$user->id}");
             
             $memberIds = $group->members()->pluck('user_id')->toArray();
             foreach ($memberIds as $memberId) {
-                RedisCacheHelper::forget("user_groups_{$memberId}");
-                RedisCacheHelper::forget("group_balances_{$group->id}_{$memberId}");
+                Cache::forget("user_groups_{$memberId}");
+                Cache::forget("group_balances_{$group->id}_{$memberId}");
             }
 
             return response()->json([
@@ -138,16 +142,17 @@ class GroupController extends Controller
     {
         try {
             $this->authorizeDelete($group);
+            $user = Auth::user();
             
             $memberIds = $group->members()->pluck('user_id')->toArray();
             
             $group->delete();
             
-            RedisCacheHelper::forget("group_details_{$group->id}_{$user->id}");
+            Cache::forget("group_details_{$group->id}_{$user->id}");
             
             foreach ($memberIds as $memberId) {
-                RedisCacheHelper::forget("user_groups_{$memberId}");
-                RedisCacheHelper::forget("group_balances_{$group->id}_{$memberId}");
+                Cache::forget("user_groups_{$memberId}");
+                Cache::forget("group_balances_{$group->id}_{$memberId}");
             }
 
             return response()->json([
@@ -182,7 +187,7 @@ class GroupController extends Controller
 
             $group->members()->attach($user->id, ['status' => 'pending']);
             
-            RedisCacheHelper::forget("user_invitations_{$user->id}");
+            Cache::forget("user_invitations_{$user->id}");
 
             return response()->json([
                 'message' => 'Member added successfully',
@@ -211,9 +216,9 @@ class GroupController extends Controller
 
             $group->members()->updateExistingPivot($user->id, ['status' => 'accepted']);
             
-            RedisCacheHelper::forget("user_groups_{$user->id}");
-            RedisCacheHelper::forget("user_invitations_{$user->id}");
-            RedisCacheHelper::forget("group_details_{$group->id}_{$user->id}");
+            Cache::forget("user_groups_{$user->id}");
+            Cache::forget("user_invitations_{$user->id}");
+            Cache::forget("group_details_{$group->id}_{$user->id}");
 
             return response()->json([
                 'message' => 'Invitation accepted successfully',
@@ -242,7 +247,7 @@ class GroupController extends Controller
 
             $group->members()->updateExistingPivot($user->id, ['status' => 'rejected']);
             
-            RedisCacheHelper::forget("user_invitations_{$user->id}");
+            Cache::forget("user_invitations_{$user->id}");
 
             return response()->json([
                 'message' => 'Invitation rejected successfully',
@@ -265,7 +270,7 @@ class GroupController extends Controller
             
             $cacheKey = "group_balances_{$group->id}_{$user->id}";
             
-            return RedisCacheHelper::remember($cacheKey, 15, function() use ($group) {
+            return Cache::remember($cacheKey, 900, function() use ($group) {
                 $expenses = $group->expenses()
                     ->with(['shares' => function($query) {
                         $query->select('id', 'expense_id', 'user_id', 'share_amount', 'paid_amount', 'is_paid');
@@ -276,7 +281,7 @@ class GroupController extends Controller
                     ->select(['id', 'group_id', 'paid_by', 'amount', 'date'])
                     ->get();
                 
-                $members = $group->members()->where('status', 'accepted')->get();
+                $members = $group->members()->wherePivot('status', 'accepted')->get();
 
                 $balances = [];
                 foreach ($members as $member) {
@@ -385,7 +390,7 @@ class GroupController extends Controller
         $user = Auth::user();
         $isMember = $group->members()
             ->where('user_id', $user->id)
-            ->where('status', 'accepted')
+            ->wherePivot('status', 'accepted')
             ->exists();
 
         if (!$isMember) {

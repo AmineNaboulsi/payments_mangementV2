@@ -2,11 +2,11 @@
 
 namespace App\Http\Controllers;
 
-use App\Helpers\RedisCacheHelper;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 
 class UserController extends Controller
 {
@@ -38,7 +38,7 @@ class UserController extends Controller
         $user = Auth::user();
         
         $cacheKey = "user_invitations_{$user->id}";
-        $invitations = RedisCacheHelper::remember($cacheKey, 5, function() use ($user) {
+        $invitations = Cache::remember($cacheKey, 300, function() use ($user) {
             return $user->groups()
                 ->wherePivot('status', 'pending')
                 ->with('creator')

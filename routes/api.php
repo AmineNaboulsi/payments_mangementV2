@@ -31,6 +31,12 @@ Route::middleware(['auth:sanctum', 'throttle:60,1'])->group(function () {
     Route::post('/logout', [LoginController::class, 'logout']);
     Route::get('/me', [LoginController::class, 'me']);
     
+    // Debug routes (remove in production)
+    Route::get('/debug/redis', [DebugController::class, 'testRedis']);
+    Route::get('/debug/auth', [DebugController::class, 'testAuth']);
+    Route::get('/debug/groups', [DebugController::class, 'testGroups']);
+    Route::get('/debug/expenses/{group}', [DebugController::class, 'testExpenses']);
+    
     // User routes
     Route::get('/users/search', [UserController::class, 'search']);
     Route::get('/users/invitations', [UserController::class, 'invitations']);
